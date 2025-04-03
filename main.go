@@ -12,10 +12,10 @@ import (
 
 type RequestBody struct {
 	Base64 string `json:"base64"`
+	Token  string `json:"token"`
 }
 
 func main() {
-
 	rabbitMQUser := "ale"
 	rabbitMQPass := "ale123"
 	rabbitMQHost := "ec2-54-167-194-141.compute-1.amazonaws.com"
@@ -25,6 +25,15 @@ func main() {
 	rabbitMQURL := fmt.Sprintf("amqp://%s:%s@%s:%s/", rabbitMQUser, rabbitMQPass, rabbitMQHost, rabbitMQPort)
 
 	http.HandleFunc("/camara", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		if r.Method != http.MethodPost {
 			http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
 			return
@@ -71,14 +80,15 @@ func main() {
 			return
 		}
 
+		messageBody := fmt.Sprintf(`{"base64": "%s", "token": "%s"}`, body.Base64, body.Token)
 		err = ch.Publish(
 			"",        // exchange
 			queueName, // routing key
 			false,     // mandatory
 			false,     // immediate
 			amqp.Publishing{
-				ContentType:  "text/plain",
-				Body:         []byte(body.Base64),
+				ContentType:  "application/json",
+				Body:         []byte(messageBody),
 				DeliveryMode: amqp.Persistent,
 			},
 		)
@@ -95,6 +105,56 @@ func main() {
 			"message": "Imagen enviada a RabbitMQ",
 		})
 	})
+
+	go func() {
+		conn, err := amqp.Dial(rabbitMQURL)
+		if err != nil {
+			log.Fatalf("Error conectando a RabbitMQ: %v", err)
+		}
+		defer conn.Close()
+
+		ch, err := conn.Channel()
+		if err != nil {
+			log.Fatalf("Error al abrir canal: %v", err)
+		}
+		defer ch.Close()
+
+		_, err = ch.QueueDeclare(
+			queueName,
+			true,  // durable
+			false, // autoDelete
+			false, // exclusive
+			false, // noWait
+			nil,   // args
+		)
+		if err != nil {
+			log.Fatalf("Error al declarar cola: %v", err)
+		}
+
+		msgs, err := ch.Consume(
+			queueName,
+			"",    // consumer
+			true,  // autoAck
+			false, // exclusive
+			false, // noLocal
+			false, // noWait
+			nil,   // args
+		)
+		if err != nil {
+			log.Fatalf("Error al consumir mensajes: %v", err)
+		}
+
+		for msg := range msgs {
+			var body RequestBody
+			if err := json.Unmarshal(msg.Body, &body); err != nil {
+				log.Printf("Error al decodificar mensaje: %v", err)
+				continue
+			}
+
+			log.Printf("Mensaje recibido - Base64: %s, Token: %s", body.Base64, body.Token)
+			
+		}
+	}()
 
 	port := ":8443"
 	log.Printf("Servidor InterFlujo escuchando en %s", port)
